@@ -59,91 +59,81 @@ export async function fetchProductName(code: string): Promise<string | null> {
     try {
         console.log(`[FETCH] Starting fetch for code: ${code.substring(0, 20)}...`);
         
-        // Send original code, server will try variations
-        let response = await fetch(`/api/product-info?code=${encodeURIComponent(code)}`);
+        // Send original code, server will try variations and AI fallbacks
+        const response = await fetch(`/api/product-info?code=${encodeURIComponent(code)}`);
         
-        const gtinMatch = code.match(/(?:01|\(01\))(\d{14})/);
-        const gtin = gtinMatch ? gtinMatch[1] : null;
-
-        // If full code fails, try with just GTIN (first 14 digits after 01)
-        if (!response.ok && gtin) {
-            console.log(`[FETCH] Full code failed, trying GTIN: ${gtin}`);
-            response = await fetch(`/api/product-info?code=${encodeURIComponent('01' + gtin)}`);
-            
-            if (!response.ok) {
-                response = await fetch(`/api/product-info?code=${encodeURIComponent(gtin)}`);
-            }
-        }
-
-        let data: any = null;
         if (response.ok) {
-            data = await response.json();
-            console.log(`[FETCH] Data received from server`);
+            const data = await response.json();
+            console.log(`[FETCH] Data received from server`, data.source ? `(Source: ${data.source})` : '');
+            
+            // Recursive function to find anything that looks like a product name
+            const findName = (obj: any, depth = 0): string | null => {
+                if (!obj || typeof obj !== 'object' || depth > 10) return null;
+                
+                // Priority keys
+                const priorityKeys = ['productName', 'goodName', 'name', 'shortName', 'description', 'title', 'product_name', 'good_name'];
+                for (const key of priorityKeys) {
+                    const val = obj[key];
+                    if (typeof val === 'string' && val.trim().length > 2) {
+                        return val.trim();
+                    }
+                    // Handle object-based names like { ru: "...", value: "..." }
+                    if (typeof val === 'object' && val !== null) {
+                        const subVal = val.ru || val.value || val.text || val.name || val.display_name;
+                        if (typeof subVal === 'string' && subVal.trim().length > 2) {
+                            return subVal.trim();
+                        }
+                    }
+                }
+                
+                // Check for 'product' or 'good' or 'item' objects specifically
+                const subObjects = ['product', 'good', 'item', 'codeResolveData', 'results'];
+                for (const key of subObjects) {
+                    if (obj[key] && typeof obj[key] === 'object') {
+                        const found = findName(obj[key], depth + 1);
+                        if (found) return found;
+                    }
+                }
+
+                // Check arrays
+                if (Array.isArray(obj)) {
+                    for (const item of obj) {
+                        const found = findName(item, depth + 1);
+                        if (found) return found;
+                    }
+                }
+                
+                // Final fallback: check all keys for anything that looks like a name
+                for (const key in obj) {
+                    if (key.toLowerCase().includes('name') || key.toLowerCase().includes('title')) {
+                        if (typeof obj[key] === 'string' && obj[key].length > 5) return obj[key];
+                    }
+                }
+                
+                return null;
+            };
+
+            let name = findName(data);
+            
+            // Fallback for brand + model if found
+            if (!name && data && data.brand && data.model) {
+                name = `${data.brand} ${data.model}`;
+            }
+
+            if (name) return name;
         } else {
             console.warn(`[FETCH] Server returned status: ${response.status}`);
         }
-        
-        // Recursive function to find anything that looks like a product name
-        const findName = (obj: any, depth = 0): string | null => {
-            if (!obj || typeof obj !== 'object' || depth > 10) return null;
-            
-            // Priority keys
-            const priorityKeys = ['productName', 'goodName', 'name', 'shortName', 'description', 'title', 'product_name', 'good_name'];
-            for (const key of priorityKeys) {
-                const val = obj[key];
-                if (typeof val === 'string' && val.trim().length > 2) {
-                    return val.trim();
-                }
-                // Handle object-based names like { ru: "...", value: "..." }
-                if (typeof val === 'object' && val !== null) {
-                    const subVal = val.ru || val.value || val.text || val.name || val.display_name;
-                    if (typeof subVal === 'string' && subVal.trim().length > 2) {
-                        return subVal.trim();
-                    }
-                }
-            }
-            
-            // Check for 'product' or 'good' or 'item' objects specifically
-            const subObjects = ['product', 'good', 'item', 'codeResolveData', 'results'];
-            for (const key of subObjects) {
-                if (obj[key] && typeof obj[key] === 'object') {
-                    const found = findName(obj[key], depth + 1);
-                    if (found) return found;
-                }
-            }
 
-            // Check arrays
-            if (Array.isArray(obj)) {
-                for (const item of obj) {
-                    const found = findName(item, depth + 1);
-                    if (found) return found;
-                }
-            }
-            
-            // Final fallback: check all keys for anything that looks like a name
-            for (const key in obj) {
-                if (key.toLowerCase().includes('name') || key.toLowerCase().includes('title')) {
-                    if (typeof obj[key] === 'string' && obj[key].length > 5) return obj[key];
-                }
-            }
-            
-            return null;
-        };
-
-        let name = data ? findName(data) : null;
-        
-        // Fallback for brand + model if found
-        if (!name && data && data.brand && data.model) {
-            name = `${data.brand} ${data.model}`;
-        }
-
-        // GOOGLE SEARCH FALLBACK
-        if (!name && gtin) {
-            console.log(`[FALLBACK] Trying Google Search for GTIN: ${gtin}`);
-            name = await fetchNameFromGoogle(gtin);
+        // Last resort: Client-side Gemini if server failed and we have a GTIN
+        const gtinMatch = code.match(/(?:01|\(01\))(\d{14})/);
+        const gtin = gtinMatch ? gtinMatch[1] : null;
+        if (gtin) {
+            console.log(`[FETCH] Server failed, trying client-side Gemini fallback for GTIN: ${gtin}`);
+            return await fetchNameFromGoogle(gtin);
         }
         
-        return name;
+        return null;
     } catch (e) {
         console.error("Failed to fetch product name", e);
         return null;
