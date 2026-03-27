@@ -153,7 +153,7 @@ app.get("/api/product-info", async (req, res) => {
 
     // Try CZ API first with parallel requests to avoid Vercel timeouts
     const tryCZ = async () => {
-      const tasks: Promise<any>[] = [];
+      const taskFactories: (() => Promise<any>)[] = [];
       
       for (const endpoint of endpoints) {
         for (const headersBase of headerSets) {
@@ -170,7 +170,7 @@ app.get("/api/product-info", async (req, res) => {
 
             for (const c of codesToTry) {
               const url = `${endpoint.url}?${endpoint.param}=${encodeURIComponent(c)}`;
-              tasks.push((async () => {
+              taskFactories.push(async () => {
                 try {
                   const response = await fetch(url, {
                     headers: currentHeaders,
@@ -184,12 +184,12 @@ app.get("/api/product-info", async (req, res) => {
                       return data;
                     }
                   }
-                  // Silently fail for Promise.any
-                  return Promise.reject(new Error(`Status ${response.status}`));
+                  // Reject without Error object to avoid log noise
+                  return Promise.reject(response.status);
                 } catch (e) {
-                  return Promise.reject(e);
+                  return Promise.reject(null);
                 }
-              })());
+              });
             }
           }
         }
@@ -200,8 +200,8 @@ app.get("/api/product-info", async (req, res) => {
         // Limit parallel tasks to avoid overwhelming the network or getting banned
         // We'll try them in batches of 10
         const batchSize = 10;
-        for (let i = 0; i < tasks.length; i += batchSize) {
-          const batch = tasks.slice(i, i + batchSize);
+        for (let i = 0; i < taskFactories.length; i += batchSize) {
+          const batch = taskFactories.slice(i, i + batchSize).map(factory => factory());
           try {
             return await Promise.any(batch);
           } catch (e) {
