@@ -63,64 +63,69 @@ export async function fetchProductName(code: string): Promise<string | null> {
         const response = await fetch(`/api/product-info?code=${encodeURIComponent(code)}`);
         
         if (response.ok) {
-            const data = await response.json();
-            console.log(`[FETCH] Data received from server`, data.source ? `(Source: ${data.source})` : '');
-            
-            // Recursive function to find anything that looks like a product name
-            const findName = (obj: any, depth = 0): string | null => {
-                if (!obj || typeof obj !== 'object' || depth > 10) return null;
+            const contentType = response.headers.get('content-type');
+            if (contentType && contentType.includes('application/json')) {
+                const data = await response.json();
+                console.log(`[FETCH] Data received from server`, data.source ? `(Source: ${data.source})` : '');
                 
-                // Priority keys
-                const priorityKeys = ['productName', 'goodName', 'name', 'shortName', 'description', 'title', 'product_name', 'good_name'];
-                for (const key of priorityKeys) {
-                    const val = obj[key];
-                    if (typeof val === 'string' && val.trim().length > 2) {
-                        return val.trim();
-                    }
-                    // Handle object-based names like { ru: "...", value: "..." }
-                    if (typeof val === 'object' && val !== null) {
-                        const subVal = val.ru || val.value || val.text || val.name || val.display_name;
-                        if (typeof subVal === 'string' && subVal.trim().length > 2) {
-                            return subVal.trim();
+                // Recursive function to find anything that looks like a product name
+                const findName = (obj: any, depth = 0): string | null => {
+                    if (!obj || typeof obj !== 'object' || depth > 10) return null;
+                    
+                    // Priority keys
+                    const priorityKeys = ['productName', 'goodName', 'name', 'shortName', 'description', 'title', 'product_name', 'good_name'];
+                    for (const key of priorityKeys) {
+                        const val = obj[key];
+                        if (typeof val === 'string' && val.trim().length > 2) {
+                            return val.trim();
+                        }
+                        // Handle object-based names like { ru: "...", value: "..." }
+                        if (typeof val === 'object' && val !== null) {
+                            const subVal = val.ru || val.value || val.text || val.name || val.display_name;
+                            if (typeof subVal === 'string' && subVal.trim().length > 2) {
+                                return subVal.trim();
+                            }
                         }
                     }
-                }
-                
-                // Check for 'product' or 'good' or 'item' objects specifically
-                const subObjects = ['product', 'good', 'item', 'codeResolveData', 'results'];
-                for (const key of subObjects) {
-                    if (obj[key] && typeof obj[key] === 'object') {
-                        const found = findName(obj[key], depth + 1);
-                        if (found) return found;
+                    
+                    // Check for 'product' or 'good' or 'item' objects specifically
+                    const subObjects = ['product', 'good', 'item', 'codeResolveData', 'results'];
+                    for (const key of subObjects) {
+                        if (obj[key] && typeof obj[key] === 'object') {
+                            const found = findName(obj[key], depth + 1);
+                            if (found) return found;
+                        }
                     }
+
+                    // Check arrays
+                    if (Array.isArray(obj)) {
+                        for (const item of obj) {
+                            const found = findName(item, depth + 1);
+                            if (found) return found;
+                        }
+                    }
+                    
+                    // Final fallback: check all keys for anything that looks like a name
+                    for (const key in obj) {
+                        if (key.toLowerCase().includes('name') || key.toLowerCase().includes('title')) {
+                            if (typeof obj[key] === 'string' && obj[key].length > 5) return obj[key];
+                        }
+                    }
+                    
+                    return null;
+                };
+
+                let name = findName(data);
+                
+                // Fallback for brand + model if found
+                if (!name && data && data.brand && data.model) {
+                    name = `${data.brand} ${data.model}`;
                 }
 
-                // Check arrays
-                if (Array.isArray(obj)) {
-                    for (const item of obj) {
-                        const found = findName(item, depth + 1);
-                        if (found) return found;
-                    }
-                }
-                
-                // Final fallback: check all keys for anything that looks like a name
-                for (const key in obj) {
-                    if (key.toLowerCase().includes('name') || key.toLowerCase().includes('title')) {
-                        if (typeof obj[key] === 'string' && obj[key].length > 5) return obj[key];
-                    }
-                }
-                
-                return null;
-            };
-
-            let name = findName(data);
-            
-            // Fallback for brand + model if found
-            if (!name && data && data.brand && data.model) {
-                name = `${data.brand} ${data.model}`;
+                if (name) return name;
+            } else {
+                console.warn(`[FETCH] Server returned non-JSON response: ${contentType}`);
             }
-
-            if (name) return name;
         } else {
             console.warn(`[FETCH] Server returned status: ${response.status}`);
         }

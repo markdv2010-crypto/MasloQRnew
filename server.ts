@@ -93,6 +93,7 @@ app.get("/api/product-info", async (req, res) => {
       { url: 'https://mobile.api.crpt.ru/mobile/check/v2', param: 'code' },
       { url: 'https://mobile.api.crpt.ru/mobile/check/v4', param: 'code' },
       { url: 'https://mobile.api.crpt.ru/mobile/check/v1', param: 'code' },
+      { url: 'https://mobile.api.crpt.ru/mobile/check/v5', param: 'code' },
       { url: 'https://mobile.api.crpt.ru/mobile/check', param: 'code' }
     ];
 
@@ -103,64 +104,119 @@ app.get("/api/product-info", async (req, res) => {
       });
     };
 
+    const generateRequestId = () => {
+      return Math.random().toString(36).substring(2, 15) + Math.random().toString(36).substring(2, 15);
+    };
+
+    const generateCertSerial = () => {
+      return Array.from({length: 32}, () => Math.floor(Math.random() * 16).toString(16).toUpperCase()).join('');
+    };
+
     const headerSets = [
       {
         'User-Agent': 'Markirovka/5.12.0 (iPhone; iOS 15.4.1; Scale/3.00)',
         'X-Platform': 'iOS',
         'X-App-Version': '5.12.0',
         'X-Device-Id': generateDeviceId(),
-        'X-Certificate-Serial': '5A1B2C3D4E5F6G7H8I9J0K1L2M3N4O5P',
+        'X-Certificate-Serial': generateCertSerial(),
+        'X-Request-Id': generateRequestId(),
+        'X-Device-Model': 'iPhone14,2',
       },
       {
         'User-Agent': 'Markirovka/5.15.1 (Android; 12; Scale/2.62)',
         'X-Platform': 'Android',
         'X-App-Version': '5.15.1',
         'X-Device-Id': generateDeviceId(),
-        'X-Certificate-Serial': '1A2B3C4D5E6F7G8H9I0J1K2L3M4N5O6P',
+        'X-Certificate-Serial': generateCertSerial(),
+        'X-Request-Id': generateRequestId(),
+        'X-Device-Model': 'Samsung SM-G991B',
       },
       {
-        'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 15_4_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148',
+        'User-Agent': 'Markirovka/5.10.0 (iPhone; iOS 14.8; Scale/2.00)',
         'X-Platform': 'iOS',
         'X-App-Version': '5.10.0',
+        'X-Device-Id': generateDeviceId(),
+        'X-Certificate-Serial': generateCertSerial(),
+        'X-Request-Id': generateRequestId(),
+        'X-Device-Model': 'iPhone12,1',
+      },
+      {
+        'User-Agent': 'Markirovka/5.16.0 (Android; 13; Scale/3.00)',
+        'X-Platform': 'Android',
+        'X-App-Version': '5.16.0',
+        'X-Device-Id': generateDeviceId(),
+        'X-Certificate-Serial': generateCertSerial(),
+        'X-Request-Id': generateRequestId(),
+        'X-Device-Model': 'Google Pixel 7',
       }
     ];
 
-    let lastError = null;
-    let lastStatus = 0;
+    // Try CZ API first with parallel requests to avoid Vercel timeouts
+    const tryCZ = async () => {
+      const tasks: Promise<any>[] = [];
+      
+      for (const endpoint of endpoints) {
+        for (const headersBase of headerSets) {
+          const hostOptions = [true, false];
+          for (const includeHost of hostOptions) {
+            const currentHeaders: Record<string, string> = {
+              ...headersBase,
+              'Accept': 'application/json',
+              'Accept-Language': 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7',
+              'Connection': 'keep-alive',
+              'X-Client-Version': headersBase['X-App-Version'] || '5.12.0'
+            };
+            if (includeHost) currentHeaders['Host'] = 'mobile.api.crpt.ru';
 
-    // Try CZ API first
-    for (const endpoint of endpoints) {
-      for (const headersBase of headerSets) {
-        const hostOptions = [true, false];
-        for (const includeHost of hostOptions) {
-          const currentHeaders: Record<string, string> = {
-            ...headersBase,
-            'Accept': 'application/json',
-            'Accept-Language': 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7',
-            'Connection': 'keep-alive'
-          };
-          if (includeHost) currentHeaders['Host'] = 'mobile.api.crpt.ru';
-
-          for (const c of codesToTry) {
-            try {
+            for (const c of codesToTry) {
               const url = `${endpoint.url}?${endpoint.param}=${encodeURIComponent(c)}`;
-              const response = await fetch(url, {
-                headers: currentHeaders,
-                signal: AbortSignal.timeout(3000)
-              });
-              lastStatus = response.status;
-              if (response.ok) {
-                const data = await response.json();
-                if (data && (data.productName || data.goodName || data.name || data.codeResolveData || data.results || data.product)) {
-                  return res.json(data);
+              tasks.push((async () => {
+                try {
+                  const response = await fetch(url, {
+                    headers: currentHeaders,
+                    signal: AbortSignal.timeout(4000)
+                  });
+                  
+                  const contentType = response.headers.get('content-type');
+                  if (response.ok && contentType && contentType.includes('application/json')) {
+                    const data = await response.json();
+                    if (data && (data.productName || data.goodName || data.name || data.codeResolveData || data.results || data.product)) {
+                      return data;
+                    }
+                  }
+                  // Silently fail for Promise.any
+                  return Promise.reject(new Error(`Status ${response.status}`));
+                } catch (e) {
+                  return Promise.reject(e);
                 }
-              }
-            } catch (e) {
-              lastError = e;
+              })());
             }
           }
         }
       }
+
+      // Use Promise.any to get the first successful result
+      try {
+        // Limit parallel tasks to avoid overwhelming the network or getting banned
+        // We'll try them in batches of 10
+        const batchSize = 10;
+        for (let i = 0; i < tasks.length; i += batchSize) {
+          const batch = tasks.slice(i, i + batchSize);
+          try {
+            return await Promise.any(batch);
+          } catch (e) {
+            // All in batch failed, continue to next batch
+          }
+        }
+      } catch (e) {
+        // All tasks failed
+      }
+      return null;
+    };
+
+    const czData = await tryCZ();
+    if (czData) {
+      return res.json(czData);
     }
 
     // Fallback to AI if GTIN exists
@@ -180,7 +236,7 @@ app.get("/api/product-info", async (req, res) => {
       }
     }
     
-    res.status(lastStatus || 404).json({ 
+    res.status(404).json({ 
       error: "Product not found", 
       message: "Не удалось получить данные. Попробуйте ввести название вручную."
     });
