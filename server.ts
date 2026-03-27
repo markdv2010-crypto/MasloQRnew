@@ -1,5 +1,4 @@
 import express from "express";
-import { createServer as createViteServer } from "vite";
 import path from "path";
 import { GoogleGenAI } from "@google/genai";
 
@@ -11,6 +10,9 @@ app.get("/api/health", (req, res) => {
   res.json({ status: "ok" });
 });
 
+// Use dynamic import for Vite to avoid production issues
+let vite: any = null;
+
 async function fetchFromGemini(gtin: string) {
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey || apiKey === "MY_GEMINI_API_KEY") return null;
@@ -20,6 +22,9 @@ async function fetchFromGemini(gtin: string) {
     const response = await ai.models.generateContent({
       model: "gemini-3-flash-preview",
       contents: `Найди точное название товара по штрихкоду (GTIN): ${gtin}. Ответь только названием товара на русском языке, без лишних слов. Если не нашел, ответь "НЕ НАЙДЕНО".`,
+      config: {
+        tools: [{ googleSearch: {} }]
+      }
     });
 
     const text = response.text;
@@ -32,7 +37,7 @@ async function fetchFromGemini(gtin: string) {
   return null;
 }
 
-async function fetchFromOpenRouter(gtin: string) {
+async function fetchFromOpenRouter(gtin: string, referer: string) {
   const apiKey = process.env.OPENROUTER_API_KEY;
   if (!apiKey || apiKey === "MY_OPENROUTER_API_KEY") return null;
 
@@ -41,7 +46,7 @@ async function fetchFromOpenRouter(gtin: string) {
       method: "POST",
       headers: {
         "Authorization": `Bearer ${apiKey}`,
-        "HTTP-Referer": process.env.APP_URL || "http://localhost:3000",
+        "HTTP-Referer": referer,
         "X-Title": "Chestny Znak Scanner",
         "Content-Type": "application/json"
       },
@@ -88,15 +93,6 @@ app.get("/api/product-info", async (req, res) => {
       if (!codesToTry.includes('01' + gtin)) codesToTry.push('01' + gtin);
     }
 
-    const endpoints = [
-      { url: 'https://mobile.api.crpt.ru/mobile/check/v3', param: 'code' },
-      { url: 'https://mobile.api.crpt.ru/mobile/check/v2', param: 'code' },
-      { url: 'https://mobile.api.crpt.ru/mobile/check/v4', param: 'code' },
-      { url: 'https://mobile.api.crpt.ru/mobile/check/v1', param: 'code' },
-      { url: 'https://mobile.api.crpt.ru/mobile/check/v5', param: 'code' },
-      { url: 'https://mobile.api.crpt.ru/mobile/check', param: 'code' }
-    ];
-
     const generateDeviceId = () => {
       return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
         var r = Math.random() * 16 | 0, v = c == 'x' ? r : (r & 0x3 | 0x8);
@@ -117,37 +113,37 @@ app.get("/api/product-info", async (req, res) => {
         'User-Agent': 'Markirovka/5.12.0 (iPhone; iOS 15.4.1; Scale/3.00)',
         'X-Platform': 'iOS',
         'X-App-Version': '5.12.0',
-        'X-Device-Id': generateDeviceId(),
-        'X-Certificate-Serial': generateCertSerial(),
-        'X-Request-Id': generateRequestId(),
         'X-Device-Model': 'iPhone14,2',
       },
       {
         'User-Agent': 'Markirovka/5.15.1 (Android; 12; Scale/2.62)',
         'X-Platform': 'Android',
         'X-App-Version': '5.15.1',
-        'X-Device-Id': generateDeviceId(),
-        'X-Certificate-Serial': generateCertSerial(),
-        'X-Request-Id': generateRequestId(),
         'X-Device-Model': 'Samsung SM-G991B',
       },
       {
         'User-Agent': 'Markirovka/5.10.0 (iPhone; iOS 14.8; Scale/2.00)',
         'X-Platform': 'iOS',
         'X-App-Version': '5.10.0',
-        'X-Device-Id': generateDeviceId(),
-        'X-Certificate-Serial': generateCertSerial(),
-        'X-Request-Id': generateRequestId(),
         'X-Device-Model': 'iPhone12,1',
       },
       {
         'User-Agent': 'Markirovka/5.16.0 (Android; 13; Scale/3.00)',
         'X-Platform': 'Android',
         'X-App-Version': '5.16.0',
-        'X-Device-Id': generateDeviceId(),
-        'X-Certificate-Serial': generateCertSerial(),
-        'X-Request-Id': generateRequestId(),
         'X-Device-Model': 'Google Pixel 7',
+      },
+      {
+        'User-Agent': 'Markirovka/5.18.0 (iPhone; iOS 16.0; Scale/3.00)',
+        'X-Platform': 'iOS',
+        'X-App-Version': '5.18.0',
+        'X-Device-Model': 'iPhone15,3',
+      },
+      {
+        'User-Agent': 'Markirovka/5.20.0 (Android; 14; Scale/3.00)',
+        'X-Platform': 'Android',
+        'X-App-Version': '5.20.0',
+        'X-Device-Model': 'Samsung SM-S918B',
       }
     ];
 
@@ -155,16 +151,34 @@ app.get("/api/product-info", async (req, res) => {
     const tryCZ = async () => {
       const taskFactories: (() => Promise<any>)[] = [];
       
-      for (const endpoint of endpoints) {
+      // Prioritize v3 and v2 as they are most common
+      const prioritizedEndpoints = [
+        { url: 'https://mobile.api.crpt.ru/mobile/check/v3', param: 'code' },
+        { url: 'https://mobile.api.crpt.ru/mobile/check/v2', param: 'code' },
+        { url: 'https://mobile.api.crpt.ru/mobile/check/v4', param: 'code' },
+        { url: 'https://mobile.api.crpt.ru/mobile/check/v5', param: 'code' },
+        { url: 'https://mobile.api.crpt.ru/mobile/check/v1', param: 'code' },
+        { url: 'https://mobile.api.crpt.ru/mobile/check', param: 'code' },
+        { url: 'https://mobile.api.crpt.ru/mobile/check/v6', param: 'code' },
+        { url: 'https://mobile.api.crpt.ru/mobile/check/v7', param: 'code' }
+      ];
+
+      for (const endpoint of prioritizedEndpoints) {
         for (const headersBase of headerSets) {
-          const hostOptions = [true, false];
+          // Try with and without Host header
+          const hostOptions = [false, true]; 
           for (const includeHost of hostOptions) {
+            const deviceId = generateDeviceId(); // New ID for every attempt
             const currentHeaders: Record<string, string> = {
               ...headersBase,
               'Accept': 'application/json',
               'Accept-Language': 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7',
               'Connection': 'keep-alive',
-              'X-Client-Version': headersBase['X-App-Version'] || '5.12.0'
+              'X-Client-Version': headersBase['X-App-Version'] || '5.12.0',
+              'X-Client-Id': deviceId,
+              'X-Device-Id': deviceId,
+              'X-Request-Id': generateRequestId(),
+              'X-Certificate-Serial': generateCertSerial(),
             };
             if (includeHost) currentHeaders['Host'] = 'mobile.api.crpt.ru';
 
@@ -174,17 +188,16 @@ app.get("/api/product-info", async (req, res) => {
                 try {
                   const response = await fetch(url, {
                     headers: currentHeaders,
-                    signal: AbortSignal.timeout(4000)
+                    signal: AbortSignal.timeout(2500) // Shorter timeout for Vercel
                   });
                   
                   const contentType = response.headers.get('content-type');
                   if (response.ok && contentType && contentType.includes('application/json')) {
                     const data = await response.json();
                     if (data && (data.productName || data.goodName || data.name || data.codeResolveData || data.results || data.product)) {
-                      return data;
+                      return { ...data, source: "Chestny Znak" };
                     }
                   }
-                  // Reject without Error object to avoid log noise
                   return Promise.reject(response.status);
                 } catch (e) {
                   return Promise.reject(null);
@@ -198,12 +211,25 @@ app.get("/api/product-info", async (req, res) => {
       // Use Promise.any to get the first successful result
       try {
         // Limit parallel tasks to avoid overwhelming the network or getting banned
-        // We'll try them in batches of 10
-        const batchSize = 10;
+        // We'll try them in batches of 20 for faster results on Vercel
+        const batchSize = 20;
+        // Total timeout for CZ search to leave time for AI fallback
+        const czStartTime = Date.now();
+        const MAX_CZ_TIME = 7000; // 7 seconds max for CZ
+
+        console.log(`[CZ] Starting search with ${taskFactories.length} combinations...`);
+
         for (let i = 0; i < taskFactories.length; i += batchSize) {
+          if (Date.now() - czStartTime > MAX_CZ_TIME) {
+            console.log("[CZ] Search timed out, moving to fallback");
+            break;
+          }
+
           const batch = taskFactories.slice(i, i + batchSize).map(factory => factory());
           try {
-            return await Promise.any(batch);
+            const result = await Promise.any(batch);
+            console.log(`[CZ] Success! Found product name in batch ${i/batchSize + 1}`);
+            return result;
           } catch (e) {
             // All in batch failed, continue to next batch
           }
@@ -211,6 +237,7 @@ app.get("/api/product-info", async (req, res) => {
       } catch (e) {
         // All tasks failed
       }
+      console.log("[CZ] All attempts failed");
       return null;
     };
 
@@ -230,7 +257,11 @@ app.get("/api/product-info", async (req, res) => {
       }
 
       // Try OpenRouter (Nemotron)
-      const openRouterName = await fetchFromOpenRouter(gtin);
+      const protocol = req.headers['x-forwarded-proto'] || 'http';
+      const host = req.headers.host;
+      const referer = process.env.APP_URL || `${protocol}://${host}`;
+      
+      const openRouterName = await fetchFromOpenRouter(gtin, referer);
       if (openRouterName) {
         return res.json({ productName: openRouterName, source: "OpenRouter" });
       }
@@ -249,7 +280,8 @@ app.get("/api/product-info", async (req, res) => {
 async function startServer() {
   // Vite middleware for development
   if (process.env.NODE_ENV !== "production") {
-    const vite = await createViteServer({
+    const { createServer: createViteServer } = await import("vite");
+    vite = await createViteServer({
       server: { middlewareMode: true },
       appType: "spa",
     });
